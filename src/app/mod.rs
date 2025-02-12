@@ -221,7 +221,7 @@ impl CeleryBuilder {
         )
         .await?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_time()
+            .enable_all()
             .thread_stack_size(self.config.thread_stack_size)
             .build()?;
         Ok(Celery {
