@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tokio::select;
 
 #[cfg(unix)]
@@ -68,7 +69,7 @@ impl CeleryBuilder {
                 default_queue: "celery".into(),
                 task_options: TaskOptions::default(),
                 task_routes: vec![],
-                thread_stack_size: 2 * 1024usize
+                thread_stack_size: 1024 * 1024 * 2
             },
         }
     }
@@ -219,7 +220,10 @@ impl CeleryBuilder {
             self.config.broker_connection_retry_delay,
         )
         .await?;
-
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_time()
+            .thread_stack_size(self.config.thread_stack_size)
+            .build()?;
         Ok(Celery {
             name: self.config.name,
             hostname: self.config.hostname,
@@ -232,7 +236,7 @@ impl CeleryBuilder {
             broker_connection_retry: self.config.broker_connection_retry,
             broker_connection_max_retries: self.config.broker_connection_max_retries,
             broker_connection_retry_delay: self.config.broker_connection_retry_delay,
-            thread_stack_size: self.config.thread_stack_size,
+            runtime,
         })
     }
 }
@@ -266,7 +270,7 @@ pub struct Celery {
     broker_connection_retry: bool,
     broker_connection_max_retries: u32,
     broker_connection_retry_delay: u32,
-    thread_stack_size: usize,
+    runtime: Runtime,
 }
 
 impl Celery {
@@ -580,10 +584,6 @@ impl Celery {
         let (task_event_tx, mut task_event_rx) = mpsc::unbounded_channel::<TaskEvent>();
         let mut pending_tasks = 0;
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .thread_stack_size(self.thread_stack_size)
-            .build()?;
-
         // This is the main loop where we receive deliveries and pass them off
         // to be handled by spawning `self.handle_delivery`.
         // At the same time we are also listening for a SIGINT (Ctrl+C) or SIGTERM interruption.
@@ -598,7 +598,7 @@ impl Celery {
                             Ok(delivery) => {
                                 let task_event_tx = task_event_tx.clone();
                                 debug!("Received delivery from {}: {:?}", queue, delivery);
-                                runtime.spawn(self.clone().handle_delivery(delivery, task_event_tx));
+                                self.runtime.spawn(self.clone().handle_delivery(delivery, task_event_tx));
                             }
                             Err(e) => {
                                 error!("Deliver failed: {}", e);
