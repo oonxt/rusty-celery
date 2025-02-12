@@ -38,6 +38,7 @@ struct Config {
     default_queue: String,
     task_options: TaskOptions,
     task_routes: Vec<(String, String)>,
+    thread_stack_size: usize
 }
 
 /// Used to create a [`Celery`] app with a custom configuration.
@@ -67,6 +68,7 @@ impl CeleryBuilder {
                 default_queue: "celery".into(),
                 task_options: TaskOptions::default(),
                 task_routes: vec![],
+                thread_stack_size: 2 * 1024usize
             },
         }
     }
@@ -189,6 +191,12 @@ impl CeleryBuilder {
         self
     }
 
+    /// Set the stack size for worker threads.
+    pub fn thread_stack_size(mut self, stack_size: usize) -> Self {
+        self.config.thread_stack_size = stack_size;
+        self
+    }
+
     /// Construct a [`Celery`] app with the current configuration.
     pub async fn build(self) -> Result<Celery, CeleryError> {
         // Declare default queue to broker.
@@ -224,6 +232,7 @@ impl CeleryBuilder {
             broker_connection_retry: self.config.broker_connection_retry,
             broker_connection_max_retries: self.config.broker_connection_max_retries,
             broker_connection_retry_delay: self.config.broker_connection_retry_delay,
+            thread_stack_size: self.config.thread_stack_size,
         })
     }
 }
@@ -257,6 +266,7 @@ pub struct Celery {
     broker_connection_retry: bool,
     broker_connection_max_retries: u32,
     broker_connection_retry_delay: u32,
+    thread_stack_size: usize,
 }
 
 impl Celery {
@@ -570,6 +580,10 @@ impl Celery {
         let (task_event_tx, mut task_event_rx) = mpsc::unbounded_channel::<TaskEvent>();
         let mut pending_tasks = 0;
 
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(self.thread_stack_size)
+            .build()?;
+
         // This is the main loop where we receive deliveries and pass them off
         // to be handled by spawning `self.handle_delivery`.
         // At the same time we are also listening for a SIGINT (Ctrl+C) or SIGTERM interruption.
@@ -584,7 +598,7 @@ impl Celery {
                             Ok(delivery) => {
                                 let task_event_tx = task_event_tx.clone();
                                 debug!("Received delivery from {}: {:?}", queue, delivery);
-                                tokio::spawn(self.clone().handle_delivery(delivery, task_event_tx));
+                                runtime.spawn(self.clone().handle_delivery(delivery, task_event_tx));
                             }
                             Err(e) => {
                                 error!("Deliver failed: {}", e);
